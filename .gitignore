@@ -1,0 +1,11 @@
+# Local runtime files — never commit
+pet.log
+pet.old.log
+pet.cfg
+pet.pos
+
+# Test artifacts
+状态秀记录.txt
+
+# Third-party dev docs not part of this repo
+skins/whale-girl/SKILL-pet-developer.md
