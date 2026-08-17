@@ -1,4 +1,4 @@
-﻿# DeepSeekPet.ps1 v2 — DeepSeek 桌面宠物「鲸鱼娘」
+﻿# DeepSeekPet.ps1 v3 — DeepSeek 桌面宠物「鲸鱼娘」
 # 100% 本地运行，不联网（状态通过本地 DSH API 获取，见 DshStateWatcher.ps1）。
 # 鲸鱼娘动画素材来自 zhu1090093659/dsh-web-ui 的 dsh-pet 插件（BSD-3-Clause），
 # 版权声明见 skins\whale-girl\LICENSE。
@@ -51,6 +51,7 @@ function Save-Cfg {
         "skin=$($script:SkinId)",
         "size=$($script:SizeKey)",
         "follow=$([int]$script:FollowMouse)",
+        "patrol=$([int]$script:PatrolMode)",
         "topmost=$([int]$script:Window.Topmost)",
         "left=$($script:Window.Left)",
         "top=$($script:Window.Top)"
@@ -129,6 +130,7 @@ $script:JumpY     = 0.0
 $script:Vy        = 0.0
 $script:SpinAngle = 0.0
 $script:FollowMouse = $false
+$script:PatrolMode  = $false
 $script:SkinId      = 'whalegirl'
 $script:CurrentAnim = 'Idle'
 $script:TransientAnim  = $null
@@ -139,6 +141,12 @@ $script:WorkNotified = $false
 $script:WasWorking   = $false
 $script:WorkStart    = [datetime]::MinValue
 $script:LastActivity = ''
+
+# 待机活动状态
+$script:Wandering    = $false
+$script:WanderDir    = 1
+$script:WanderSteps  = 0
+$script:LastInteract = Get-Date
 
 # 工具名/状态 → 中文显示
 $script:ToolNames = @{
@@ -251,7 +259,8 @@ try {
     $wg.RunningLeft  = Convert-GifToFrames (Join-Path $wgDir 'running-left.gif')
     $wg.Review    = Convert-GifToFrames (Join-Path $wgDir 'review.gif')
     $wg.Failed    = Convert-GifToFrames (Join-Path $wgDir 'failed.gif')
-    Write-Log "gif ok: idle=$($wg.Idle.Frames.Count) wave=$($wg.Wave.Frames.Count) run=$($wg.Working.Frames.Count) jump=$($wg.Celebrate.Frames.Count) wait=$($wg.Sleep.Frames.Count) runR=$($wg.RunningRight.Frames.Count) runL=$($wg.RunningLeft.Frames.Count) review=$($wg.Review.Frames.Count) failed=$($wg.Failed.Frames.Count)"
+    $wg.Waiting   = Convert-GifToFrames (Join-Path $wgDir 'waiting.gif')
+    Write-Log "gif ok: idle=$($wg.Idle.Frames.Count) wave=$($wg.Wave.Frames.Count) run=$($wg.Working.Frames.Count) jump=$($wg.Celebrate.Frames.Count) wait=$($wg.Waiting.Frames.Count) runR=$($wg.RunningRight.Frames.Count) runL=$($wg.RunningLeft.Frames.Count) review=$($wg.Review.Frames.Count) failed=$($wg.Failed.Frames.Count)"
 } catch {
     $script:Skins['whalegirl'].Type = 'missing'
     Write-Log "gif load FAILED: $($_.Exception.Message)"
@@ -474,6 +483,7 @@ function Set-SleepState([bool]$sleep) {
         $script:Window.Opacity = 1.0
         Set-Mode 'idle'
         Show-Bubble '睡醒啦～刚才梦到你在写代码'
+        if ($script:PatrolMode) { Start-Wander -Long }
     }
 }
 
@@ -488,9 +498,53 @@ function Start-Celebrate {
 
 function Invoke-Click {
     if ($script:Sleeping) { Set-SleepState $false; return }
+    $script:LastInteract = Get-Date
     Start-Jump
     Start-Transient 'Wave' 1.3
     Show-Bubble ($script:IdleLines | Get-Random)
+}
+
+# ---------- 待机活动：随机散步 / 打哈欠 / 小跳 / 挥手 / 闲聊 / 打盹 ----------
+function Start-Wander([switch]$Long) {
+    if ($script:Jumping -or $script:Wandering) { return }
+    $script:Wandering = $true
+    $script:WanderDir = if ((Get-Random -Maximum 2) -eq 0) { -1 } else { 1 }
+    $script:WanderSteps = if ($Long) { Get-Random -Minimum 150 -Maximum 350 } else { Get-Random -Minimum 50 -Maximum 140 }
+    Write-Log "idle-action: wander dir=$($script:WanderDir) steps=$($script:WanderSteps)"
+}
+
+function Start-IdleAction {
+    if ($script:Sleeping -or $script:Dragging -or $script:Mode -ne 'idle') { return }
+    if ($script:TransientAnim -or $script:Wandering -or $script:Jumping) { return }
+    if ($script:PatrolMode) { return }   # 巡逻时她自己找乐子，不抢戏
+    $idleMins = ((Get-Date) - $script:LastInteract).TotalMinutes
+    $roll = Get-Random -Maximum 100
+    if ($idleMins -ge 3 -and $roll -lt 20) {
+        # 长时间没人理：打个小盹
+        Start-Transient 'Waiting' 4.0
+        Show-Bubble '💤 打个盹…你回来了叫醒我哦'
+        Write-Log 'idle-action: nap'
+    } elseif ($roll -lt 40) {
+        Start-Wander
+    } elseif ($roll -lt 55) {
+        $script:Bounce = 1.25
+        Start-Transient 'Wave' 1.3
+        Show-Bubble ($script:IdleLines | Get-Random)
+        Write-Log 'idle-action: wave'
+    } elseif ($roll -lt 70) {
+        Start-Jump
+        Write-Log 'idle-action: hop'
+    } elseif ($roll -lt 85) {
+        Start-Transient 'Waiting' 1.6
+        Show-Bubble '啊～有点困'
+        Write-Log 'idle-action: yawn'
+    } else {
+        Show-Bubble ($script:IdleLines | Get-Random)
+        Write-Log 'idle-action: talk'
+    }
+    $next = Get-Random -Minimum 18 -Maximum 45
+    $script:IdleActionTimer.Interval = [TimeSpan]::FromSeconds($next)
+    $script:IdleActionTimer.Start()
 }
 
 # ---------- 拖拽 ----------
@@ -519,6 +573,7 @@ $script:Window.Add_MouseMove({
 $script:Window.Add_MouseLeftButtonUp({
     if ($script:Dragging) {
         $script:Dragging = $false
+        $script:LastInteract = Get-Date
         try { $script:Window.ReleaseMouseCapture() | Out-Null } catch {}
         if ($script:MovedPx -lt 8) { Invoke-Click } else { try { Save-Cfg } catch {} }
     }
@@ -529,18 +584,47 @@ $menu = New-Object System.Windows.Controls.ContextMenu
 
 $miPet = New-Object System.Windows.Controls.MenuItem
 $miPet.Header = '摸摸头'
-$miPet.Add_Click({ Start-Jump; Start-Transient 'Wave' 1.3; Show-Bubble ($script:PetLines | Get-Random) })
+$miPet.Add_Click({ $script:LastInteract = Get-Date; Start-Jump; Start-Transient 'Wave' 1.3; Show-Bubble ($script:PetLines | Get-Random) })
 [void]$menu.Items.Add($miPet)
 
 $miFood = New-Object System.Windows.Controls.MenuItem
 $miFood.Header = '喂小鱼干 🐟'
-$miFood.Add_Click({ Start-Jump; Start-Transient 'Wave' 1.3; Show-Bubble ($script:FoodLines | Get-Random) })
+$miFood.Add_Click({ $script:LastInteract = Get-Date; Start-Jump; Start-Transient 'Wave' 1.3; Show-Bubble ($script:FoodLines | Get-Random) })
 [void]$menu.Items.Add($miFood)
 
 $miSay = New-Object System.Windows.Controls.MenuItem
 $miSay.Header = '说句话'
 $miSay.Add_Click({ Show-Bubble ($script:IdleLines | Get-Random) })
 [void]$menu.Items.Add($miSay)
+
+$miWalk = New-Object System.Windows.Controls.MenuItem
+$miWalk.Header = '去散步 🚶'
+$miWalk.Add_Click({
+    $script:LastInteract = Get-Date
+    if ($script:Sleeping) { Set-SleepState $false }
+    if ($script:Mode -ne 'idle') { Set-Mode 'idle' }
+    Start-Wander -Long
+})
+[void]$menu.Items.Add($miWalk)
+
+$miPatrol = New-Object System.Windows.Controls.MenuItem
+$miPatrol.Header = '巡逻模式（不停散步）🚶‍♂️'
+$miPatrol.IsCheckable = $true
+$miPatrol.Add_Click({
+    $script:PatrolMode = $miPatrol.IsChecked
+    if ($script:PatrolMode) {
+        $script:LastInteract = Get-Date
+        if ($script:Sleeping) { Set-SleepState $false }
+        if ($script:Mode -ne 'idle') { Set-Mode 'idle' }
+        Start-Wander -Long
+        Show-Bubble '巡逻模式启动！绕屏幕散步去～'
+    } else {
+        $script:Wandering = $false
+        Show-Bubble '巡逻结束，歇会儿～'
+    }
+    try { Save-Cfg } catch {}
+})
+[void]$menu.Items.Add($miPatrol)
 
 $miSkin = New-Object System.Windows.Controls.MenuItem
 $miSkin.Header = '皮肤'
@@ -630,6 +714,10 @@ $script:MainTimer.Add_Tick({
                 if ($fdx -lt 0) { $anim = 'RunningLeft' } else { $anim = 'RunningRight' }
             }
         }
+        # 待机散步时同样换成跑动动画
+        if (-not $script:TransientAnim -and $script:Wandering -and $skin.ContainsKey('RunningLeft')) {
+            if ($script:WanderDir -lt 0) { $anim = 'RunningLeft' } else { $anim = 'RunningRight' }
+        }
         $data = $skin[$anim]
         if ($data -and $data.Frames.Count -gt 0) {
             $script:FrameAccum += 33
@@ -683,6 +771,28 @@ $script:MainTimer.Add_Tick({
     }
     $script:MoveT.Y = $bob + $script:JumpY
 
+    # 待机散步（水平移动，到屏幕边缘自动停下并保存位置；巡逻模式则掉头继续走）
+    if ($script:Wandering -and -not $script:Sleeping -and -not $script:Dragging) {
+        $sb2 = Get-ScreenBounds
+        $minX = $sb2.X / $script:DPI
+        $maxX = ($sb2.Right - $script:Window.Width) / $script:DPI
+        $script:Window.Left += $script:WanderDir * 2
+        $script:WanderSteps--
+        if ($script:Window.Left -le $minX -or $script:Window.Left -ge $maxX -or $script:WanderSteps -le 0) {
+            $script:Window.Left = [Math]::Max($minX, [Math]::Min($script:Window.Left, $maxX))
+            if ($script:PatrolMode) {
+                # 巡逻：掉头继续走
+                $script:WanderDir = -$script:WanderDir
+                $script:WanderSteps = Get-Random -Minimum 120 -Maximum 400
+                Write-Log 'idle-action: patrol turn'
+            } else {
+                $script:Wandering = $false
+                Write-Log 'idle-action: wander done'
+                try { Save-Cfg } catch {}
+            }
+        }
+    }
+
     # 跟随鼠标
     if ($script:FollowMouse -and -not $script:Dragging -and -not $script:Sleeping) {
         $tx = [System.Windows.Forms.Cursor]::Position.X / $script:DPI - $script:Window.Width / 2
@@ -696,11 +806,19 @@ $script:MainTimer.Add_Tick({
 $script:IdleTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:IdleTimer.Interval = [TimeSpan]::FromSeconds(110)
 $script:IdleTimer.Add_Tick({
-    if (-not $script:Sleeping -and $script:Mode -eq 'idle') {
+    if (-not $script:Sleeping -and $script:Mode -eq 'idle' -and -not $script:Wandering) {
         if ((Get-Random -Maximum 100) -lt 35) {
             Show-Bubble ($script:IdleLines | Get-Random)
         }
     }
+})
+
+# ---------- 待机活动调度（随机间隔 18-45 秒） ----------
+$script:IdleActionTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:IdleActionTimer.Interval = [TimeSpan]::FromSeconds(25)
+$script:IdleActionTimer.Add_Tick({
+    $script:IdleActionTimer.Stop()
+    Start-IdleAction
 })
 
 # ---------- DSH 状态引擎（辅助进程轮询，UI 线程只读状态文件） ----------
@@ -805,6 +923,7 @@ $script:Window.Add_Loaded({
     if ($cfg.ContainsKey('skin')) { Apply-Skin $cfg['skin'] } else { Apply-Skin 'whalegirl' }
     foreach ($k in $script:SizeMenuItems.Keys) { $script:SizeMenuItems[$k].IsChecked = ($k -eq $script:SizeKey) }
     if ($cfg['follow'] -eq '1') { $script:FollowMouse = $true; $miFollow.IsChecked = $true }
+    if ($cfg['patrol'] -eq '1') { $script:PatrolMode = $true; $miPatrol.IsChecked = $true }
     if ($cfg['topmost'] -eq '0') { $script:Window.Topmost = $false; $miTop.IsChecked = $false }
 
     # 默认位置：鼠标所在屏幕的右下角；钳制到全部显示器的并集内
@@ -827,12 +946,15 @@ $script:Window.Add_Loaded({
     $script:IdleTimer.Start()
     $script:WatchTimer.Start()
     $script:WelcomeTimer.Start()
+    $script:IdleActionTimer.Start()
+    if ($script:PatrolMode) { Start-Wander -Long }
 })
 
 $script:Window.Add_Closed({
     Write-Log 'closed'
     $script:MainTimer.Stop()
     $script:IdleTimer.Stop()
+    $script:IdleActionTimer.Stop()
     $script:WatchTimer.Stop()
     $script:CelebrateTimer.Stop()
     $script:BubbleHide.Stop()
