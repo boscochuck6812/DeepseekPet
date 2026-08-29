@@ -145,8 +145,16 @@ $script:LastActivity = ''
 # 待机活动状态
 $script:Wandering    = $false
 $script:WanderDir    = 1
+$script:WanderDirY   = 0
 $script:WanderSteps  = 0
 $script:LastInteract = Get-Date
+
+# 运动物理：甩飞动量
+$script:Flying   = $false
+$script:VelX     = 0.0
+$script:VelY     = 0.0
+$script:LastDx   = 0.0
+$script:LastDy   = 0.0
 
 # 工具名/状态 → 中文显示
 $script:ToolNames = @{
@@ -434,6 +442,16 @@ function Get-ScreenBounds {
     return @{ X = $minX; Y = $minY; Right = $maxX; Bottom = $maxY }
 }
 
+# 宠物当前所在显示器的边界（巡逻/甩飞只用当前屏：跨屏 DPI 不同会导致视觉尺寸变化）
+function Get-CurrentScreenBounds {
+    $cx = [int](($script:Window.Left + $script:Window.Width / 2) * $script:DPI)
+    $cy = [int](($script:Window.Top + $script:Window.Height / 2) * $script:DPI)
+    $pt = New-Object System.Drawing.Point($cx, $cy)
+    $s = [System.Windows.Forms.Screen]::FromPoint($pt)
+    if (-not $s) { return Get-ScreenBounds }
+    return @{ X = $s.Bounds.X; Y = $s.Bounds.Y; Right = $s.Bounds.Right; Bottom = $s.Bounds.Bottom }
+}
+
 # ---------- 大小切换 ----------
 function Apply-Size([string]$key) {
     if (-not $script:SizeTable.ContainsKey($key)) { return }
@@ -506,16 +524,19 @@ function Invoke-Click {
 
 # ---------- 待机活动：随机散步 / 打哈欠 / 小跳 / 挥手 / 闲聊 / 打盹 ----------
 function Start-Wander([switch]$Long) {
-    if ($script:Jumping -or $script:Wandering) { return }
+    if ($script:Jumping -or $script:Wandering -or $script:Flying -or $script:FollowMouse) { return }
     $script:Wandering = $true
-    $script:WanderDir = if ((Get-Random -Maximum 2) -eq 0) { -1 } else { 1 }
+    # 四方向直线行走（上下左右），覆盖整个屏幕；不斜走，视觉干净
+    $d = @(@(-1, 0), @(1, 0), @(0, -1), @(0, 1)) | Get-Random
+    $script:WanderDir = $d[0]
+    $script:WanderDirY = $d[1]
     $script:WanderSteps = if ($Long) { Get-Random -Minimum 150 -Maximum 350 } else { Get-Random -Minimum 50 -Maximum 140 }
-    Write-Log "idle-action: wander dir=$($script:WanderDir) steps=$($script:WanderSteps)"
+    Write-Log "idle-action: wander dir=$($script:WanderDir),$($script:WanderDirY) steps=$($script:WanderSteps)"
 }
 
 function Start-IdleAction {
     if ($script:Sleeping -or $script:Dragging -or $script:Mode -ne 'idle') { return }
-    if ($script:TransientAnim -or $script:Wandering -or $script:Jumping) { return }
+    if ($script:TransientAnim -or $script:Wandering -or $script:Jumping -or $script:Flying) { return }
     if ($script:PatrolMode) { return }   # 巡逻时她自己找乐子，不抢戏
     $idleMins = ((Get-Date) - $script:LastInteract).TotalMinutes
     $roll = Get-Random -Maximum 100
@@ -527,7 +548,6 @@ function Start-IdleAction {
     } elseif ($roll -lt 40) {
         Start-Wander
     } elseif ($roll -lt 55) {
-        $script:Bounce = 1.25
         Start-Transient 'Wave' 1.3
         Show-Bubble ($script:IdleLines | Get-Random)
         Write-Log 'idle-action: wave'
@@ -547,9 +567,12 @@ function Start-IdleAction {
     $script:IdleActionTimer.Start()
 }
 
-# ---------- 拖拽 ----------
+# ---------- 拖拽（支持甩飞：松手带惯性滑动 + 撞墙弹回） ----------
 $script:Window.Add_MouseLeftButtonDown({
     $script:Dragging = $true
+    $script:Flying = $false
+    $script:VelX = 0.0
+    $script:VelY = 0.0
     $script:MovedPx = 0
     $script:LastX = [System.Windows.Forms.Cursor]::Position.X
     $script:LastY = [System.Windows.Forms.Cursor]::Position.Y
@@ -565,6 +588,8 @@ $script:Window.Add_MouseMove({
         $script:MovedPx += [Math]::Abs($now.X - $script:LastX) + [Math]::Abs($now.Y - $script:LastY)
         $script:Window.Left += $dx
         $script:Window.Top += $dy
+        $script:LastDx = $dx
+        $script:LastDy = $dy
         $script:LastX = $now.X
         $script:LastY = $now.Y
     }
@@ -575,7 +600,18 @@ $script:Window.Add_MouseLeftButtonUp({
         $script:Dragging = $false
         $script:LastInteract = Get-Date
         try { $script:Window.ReleaseMouseCapture() | Out-Null } catch {}
-        if ($script:MovedPx -lt 8) { Invoke-Click } else { try { Save-Cfg } catch {} }
+        if ($script:MovedPx -lt 8) {
+            Invoke-Click
+        } else {
+            # 松手速度 = 最近一次移动增量 × 放大系数 → 甩飞
+            $script:VelX = $script:LastDx * 13
+            $script:VelY = $script:LastDy * 13
+            if ([Math]::Abs($script:VelX) -gt 2.5 -or [Math]::Abs($script:VelY) -gt 2.5) {
+                $script:Flying = $true
+                Write-Log "fling: v=$([math]::Round($script:VelX,1)),$([math]::Round($script:VelY,1))"
+            }
+            try { Save-Cfg } catch {}
+        }
     }
 })
 
@@ -614,6 +650,9 @@ $miPatrol.Add_Click({
     $script:PatrolMode = $miPatrol.IsChecked
     if ($script:PatrolMode) {
         $script:LastInteract = Get-Date
+        $script:Flying = $false
+        $script:VelX = 0.0
+        $script:VelY = 0.0
         if ($script:Sleeping) { Set-SleepState $false }
         if ($script:Mode -ne 'idle') { Set-Mode 'idle' }
         Start-Wander -Long
@@ -686,6 +725,7 @@ $script:CelebrateTimer.Add_Tick({
     if (-not $script:Sleeping -and $script:Mode -eq 'celebrate') {
         Set-Mode 'idle'
         Show-Bubble '搞定啦～等你发指令 🐳'
+        if ($script:PatrolMode) { Start-Wander -Long }
     }
 })
 
@@ -714,9 +754,11 @@ $script:MainTimer.Add_Tick({
                 if ($fdx -lt 0) { $anim = 'RunningLeft' } else { $anim = 'RunningRight' }
             }
         }
-        # 待机散步时同样换成跑动动画
+        # 待机散步时换成跑动动画：左右走用左右跑，上下走用正面跑
         if (-not $script:TransientAnim -and $script:Wandering -and $skin.ContainsKey('RunningLeft')) {
-            if ($script:WanderDir -lt 0) { $anim = 'RunningLeft' } else { $anim = 'RunningRight' }
+            if ($script:WanderDir -lt 0) { $anim = 'RunningLeft' }
+            elseif ($script:WanderDir -gt 0) { $anim = 'RunningRight' }
+            elseif ($script:WanderDirY -ne 0 -and $skin.ContainsKey('Working')) { $anim = 'Working' }
         }
         $data = $skin[$anim]
         if ($data -and $data.Frames.Count -gt 0) {
@@ -731,7 +773,7 @@ $script:MainTimer.Add_Tick({
         }
     }
 
-    # 弹跳回弹
+    # 弹跳回弹（干净版：同一时间只保留一个缩放动画，不与其它动作叠加）
     $script:Bounce += (1.0 - $script:Bounce) * 0.12
     if ([Math]::Abs($script:Bounce - 1.0) -lt 0.004) { $script:Bounce = 1.0 }
     $script:ScaleT.ScaleX = $script:Bounce
@@ -771,30 +813,77 @@ $script:MainTimer.Add_Tick({
     }
     $script:MoveT.Y = $bob + $script:JumpY
 
-    # 待机散步（水平移动，到屏幕边缘自动停下并保存位置；巡逻模式则掉头继续走）
-    if ($script:Wandering -and -not $script:Sleeping -and -not $script:Dragging) {
-        $sb2 = Get-ScreenBounds
+    # 待机散步：四方向直线行走覆盖当前显示器；普通散步碰边即停，巡逻模式四边反弹（干活时冻结）
+    if ($script:Wandering -and -not $script:Sleeping -and -not $script:Dragging -and $script:Mode -eq 'idle') {
+        $sb2 = Get-CurrentScreenBounds
         $minX = $sb2.X / $script:DPI
         $maxX = ($sb2.Right - $script:Window.Width) / $script:DPI
+        $minY = $sb2.Y / $script:DPI
+        $maxY = ($sb2.Bottom - $script:Window.Height) / $script:DPI
         $script:Window.Left += $script:WanderDir * 2
+        $script:Window.Top  += $script:WanderDirY * 2
         $script:WanderSteps--
-        if ($script:Window.Left -le $minX -or $script:Window.Left -ge $maxX -or $script:WanderSteps -le 0) {
-            $script:Window.Left = [Math]::Max($minX, [Math]::Min($script:Window.Left, $maxX))
-            if ($script:PatrolMode) {
-                # 巡逻：掉头继续走
-                $script:WanderDir = -$script:WanderDir
-                $script:WanderSteps = Get-Random -Minimum 120 -Maximum 400
-                Write-Log 'idle-action: patrol turn'
-            } else {
-                $script:Wandering = $false
-                Write-Log 'idle-action: wander done'
-                try { Save-Cfg } catch {}
+        $hit = $false
+        if ($script:Window.Left -le $minX) {
+            $script:Window.Left = $minX
+            if ($script:PatrolMode) { $script:WanderDir = 1 } else { $hit = $true }
+        } elseif ($script:Window.Left -ge $maxX) {
+            $script:Window.Left = $maxX
+            if ($script:PatrolMode) { $script:WanderDir = -1 } else { $hit = $true }
+        }
+        if ($script:Window.Top -le $minY) {
+            $script:Window.Top = $minY
+            if ($script:PatrolMode) { $script:WanderDirY = 1 } else { $hit = $true }
+        } elseif ($script:Window.Top -ge $maxY) {
+            $script:Window.Top = $maxY
+            if ($script:PatrolMode) { $script:WanderDirY = -1 } else { $hit = $true }
+        }
+        if ($script:PatrolMode) {
+            # 巡逻永不停止：偶尔换个方向，路线自然
+            if ($script:WanderSteps -le 0) { $script:WanderSteps = Get-Random -Minimum 120 -Maximum 400 }
+            if ((Get-Random -Maximum 100) -lt 4) {
+                $d = @(@(-1, 0), @(1, 0), @(0, -1), @(0, 1)) | Get-Random
+                $script:WanderDir = $d[0]
+                $script:WanderDirY = $d[1]
             }
+        } elseif ($hit -or $script:WanderSteps -le 0) {
+            $script:Wandering = $false
+            Write-Log 'idle-action: wander done'
+            try { Save-Cfg } catch {}
         }
     }
 
-    # 跟随鼠标
-    if ($script:FollowMouse -and -not $script:Dragging -and -not $script:Sleeping) {
+    # 甩飞物理：惯性滑动 + 摩擦 + 当前显示器内弹性反弹（干活时冻结；撞墙不再压扁，尺寸不自动变）
+    if ($script:Flying -and -not $script:Dragging -and $script:Mode -eq 'idle') {
+        $sb2 = Get-CurrentScreenBounds
+        $minX = $sb2.X / $script:DPI
+        $maxX = ($sb2.Right - $script:Window.Width) / $script:DPI
+        $minY = $sb2.Y / $script:DPI
+        $maxY = ($sb2.Bottom - $script:Window.Height) / $script:DPI
+        $script:Window.Left += $script:VelX
+        $script:Window.Top  += $script:VelY
+        $script:VelX *= 0.95
+        $script:VelY *= 0.95
+        if ($script:Window.Left -le $minX -and $script:VelX -lt 0) {
+            $script:Window.Left = $minX; $script:VelX = -$script:VelX * 0.6
+        } elseif ($script:Window.Left -ge $maxX -and $script:VelX -gt 0) {
+            $script:Window.Left = $maxX; $script:VelX = -$script:VelX * 0.6
+        }
+        if ($script:Window.Top -le $minY -and $script:VelY -lt 0) {
+            $script:Window.Top = $minY; $script:VelY = -$script:VelY * 0.6
+        } elseif ($script:Window.Top -ge $maxY -and $script:VelY -gt 0) {
+            $script:Window.Top = $maxY; $script:VelY = -$script:VelY * 0.6
+        }
+        if ([Math]::Abs($script:VelX) + [Math]::Abs($script:VelY) -lt 0.8) {
+            $script:Flying = $false
+            $script:VelX = 0.0
+            $script:VelY = 0.0
+            try { Save-Cfg } catch {}
+        }
+    }
+
+    # 跟随鼠标（干活时冻结）
+    if ($script:FollowMouse -and -not $script:Dragging -and -not $script:Flying -and -not $script:Sleeping -and $script:Mode -eq 'idle') {
         $tx = [System.Windows.Forms.Cursor]::Position.X / $script:DPI - $script:Window.Width / 2
         $ty = [System.Windows.Forms.Cursor]::Position.Y / $script:DPI - $script:Window.Height / 2
         $script:Window.Left += ($tx - $script:Window.Left) * 0.06
@@ -863,6 +952,11 @@ $script:WatchTimer.Add_Tick({
                 Write-Log 'watcher: work start'
                 Set-Mode 'working'
                 $script:LastActivity = ''
+                # 干活时不许乱动：冻结巡逻/散步/甩飞/跟随
+                $script:Wandering = $false
+                $script:Flying = $false
+                $script:VelX = 0.0
+                $script:VelY = 0.0
             }
             if (-not $script:Sleeping -and $script:Mode -eq 'working') {
                 if ($state.activity -and $state.activity -ne $script:LastActivity) {
@@ -896,6 +990,7 @@ $script:WatchTimer.Add_Tick({
                 elseif (-not $script:Sleeping -and $script:Mode -eq 'working') {
                     Set-Mode 'idle'
                     Show-Bubble '搞定啦～等你发指令 🐳'
+                    if ($script:PatrolMode) { Start-Wander -Long }
                 }
             }
         }
