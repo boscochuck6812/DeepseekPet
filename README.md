@@ -71,6 +71,10 @@
 - **卸载？** 直接删除整个 `DeepSeekPet` 文件夹，不往系统里写任何东西。
 - **开机自启？** `Win+R` → `shell:startup` → 放入 `StartPet.bat` 的快捷方式。
 
+## 贡献
+
+欢迎提 Issue / PR：新皮肤、新玩法、新点子都欢迎；也欢迎随时联系我交流（GitHub: [@boscochuck6812](https://github.com/boscochuck6812)），每份贡献都非常感谢 💙
+
 ## 以后还可以加
 
 - 亲密度系统（幼鲸 → 伙伴 → 挚友 → 深海羁绊）+ 小鱼干经济（官方 dsh-pet 同款玩法）
