@@ -73,7 +73,7 @@
 
 ## 贡献
 
-欢迎提 Issue / PR：新皮肤、新玩法、新点子都欢迎；也欢迎随时联系我交流（GitHub: [@boscochuck6812](https://github.com/boscochuck6812)），每份贡献都非常感谢 💙
+欢迎提 Issue / PR：新皮肤、新玩法、新点子都欢迎；也欢迎随时联系我交流：GitHub [@boscochuck6812](https://github.com/boscochuck6812) 或邮件联系也可以（邮箱见我的 GitHub 主页），每份贡献都非常感谢 💙
 
 ## 以后还可以加
 
